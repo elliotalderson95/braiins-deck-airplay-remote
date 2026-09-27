@@ -1,0 +1,43 @@
+#!/bin/sh
+# Mute the Deck's AirPlay sound at once while a paused song's buffered audio
+# plays out, or turn it back on. It flips AirPlay's own mute switch
+# (alsa-airplay.conf), which silences the sound itself within ~0.1 s.
+#
+#   hush on    mute AirPlay now; back on after HUSH_SECS
+#   hush off   turn it back on now
+#
+# Muting always ends on its own, so AirPlay never stays silent. A newer hush
+# takes over from an older one's timer. Alarms are never muted.
+
+# The Deck still holds about 2 s of music when the iPhone pauses.
+HUSH_SECS=4
+TOKEN_FILE=/tmp/airplay-remote/hush
+
+# ALSA adds the switch the first time AirPlay plays after a boot; before that
+# there is nothing to mute.
+airplay_sound() {
+	amixer -q cset 'name=AirPlay Playback Switch' "$1" 2>/dev/null
+}
+
+mkdir -p /tmp/airplay-remote
+case "$1" in
+on)
+	token="$$.$(date +%s)"
+	echo "$token" >"$TOKEN_FILE"
+	airplay_sound off
+	(
+		sleep "$HUSH_SECS"
+		if [ "$(cat "$TOKEN_FILE" 2>/dev/null)" = "$token" ]; then
+			airplay_sound on
+		fi
+	) </dev/null >/dev/null 2>&1 &
+	;;
+off)
+	echo off >"$TOKEN_FILE"
+	airplay_sound on
+	;;
+*)
+	echo "usage: hush on|off" >&2
+	exit 2
+	;;
+esac

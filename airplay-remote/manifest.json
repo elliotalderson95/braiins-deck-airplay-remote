@@ -1,0 +1,70 @@
+{
+  "$schema": "../bmc-sdk/bmc-widget-manifest/manifest.schema.json",
+  "uid": "ac0f9076-1759-473c-b88a-0f6a4f700aa8",
+  "version": "0.1.7",
+  "name": "AirPlay Remote",
+  "subname": "Now playing",
+  "description": "What your iPhone plays on the Deck's AirPlay speaker, with play/pause, skip and volume",
+  "config_help": "Controls whatever your iPhone is playing on the Deck's AirPlay speaker.\n\n**Start music:** on the iPhone, open Control Center, tap AirPlay on the music card and pick **Braiins Deck**. The widget then shows the song and its buttons act on the iPhone, like its own volume and play buttons.\n\n**Light:** the light strip glows while music plays and turns off when it pauses or stops, even while another scene is showing.\n\nNeeds the AirPlay speaker and its remote bridge installed on this Deck: `deck/install.sh` and `deck/install-remote.sh` from github.com/elliotalderson95/braiins-deck-airplay-remote.",
+  "binary": "bin/airplay-remote",
+  "icon": "assets/icon.svg",
+  "category": "media",
+  "supported_viewports": [
+    {
+      "type": "rectangular",
+      "min_width": 317,
+      "min_height": 238
+    }
+  ],
+  "params": {
+    "playing_light": {
+      "name": "Light while playing",
+      "description": "What the light strip does while music plays; it turns off when the music pauses or stops",
+      "type": "string",
+      "default_value": "steady",
+      "enum_values": [
+        {
+          "value": "steady",
+          "label": "Steady"
+        },
+        {
+          "value": "pulse",
+          "label": "Slow pulse"
+        },
+        {
+          "value": "off",
+          "label": "Off (leave the light alone)"
+        }
+      ],
+      "optional": true
+    },
+    "light_color": {
+      "name": "Light colour",
+      "type": "string",
+      "default_value": "violet",
+      "enum_values": [
+        {
+          "value": "violet",
+          "label": "Violet"
+        },
+        {
+          "value": "warm-white",
+          "label": "Warm white"
+        },
+        {
+          "value": "blue",
+          "label": "Blue"
+        },
+        {
+          "value": "green",
+          "label": "Green"
+        },
+        {
+          "value": "orange",
+          "label": "Orange"
+        }
+      ],
+      "optional": true
+    }
+  }
+}

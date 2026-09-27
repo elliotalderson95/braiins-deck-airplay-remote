@@ -1,0 +1,10 @@
+# /etc/hotplug.d/iface/99-deck-airplay
+#
+# The built-in mDNS responder reads the Deck's IP address only when
+# shairport-sync starts, so restart it whenever the Wi-Fi connection comes
+# up (at boot, after a reconnect, or with a new DHCP address). Otherwise
+# iPhones would not find the speaker, or would look for it at a stale address.
+
+if [ "$ACTION" = ifup ] && [ "$INTERFACE" = wifi_sta ]; then
+	/etc/init.d/shairport-sync enabled && /etc/init.d/shairport-sync restart
+fi
