@@ -1,7 +1,7 @@
 {
   "$schema": "../bmc-sdk/bmc-widget-manifest/manifest.schema.json",
   "uid": "ac0f9076-1759-473c-b88a-0f6a4f700aa8",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "name": "AirPlay Remote",
   "subname": "Now playing",
   "description": "What your iPhone plays on the Deck's AirPlay speaker, with play/pause, skip and volume",

@@ -132,6 +132,69 @@ impl NowPlaying {
     }
 }
 
+/// Longest a paused song stays on screen once its iPhone has ended the audio
+/// stream (see [`carry_over`]).
+pub const KEEP_PAUSED_SECS: i64 = 30 * 60;
+
+/// What the widget knows beyond the bridge's report, for [`carry_over`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Carry {
+    /// The shown session's iPhone still offers remote control.
+    pub reachable: bool,
+    /// A play pressed on the Deck is waiting for the iPhone's new stream.
+    pub resuming: bool,
+    /// How long the bridge has reported no session, in seconds.
+    pub idle_secs: i64,
+}
+
+/// The session to show, given what is on screen and the bridge's latest
+/// report. An iPhone ends its audio stream about 6 s into a pause and starts
+/// a new one about 4 s after play, and the bridge reports each as the session
+/// ending or starting. So while the iPhone still offers remote control, a
+/// paused song stays on screen with its buttons, for up to
+/// [`KEEP_PAUSED_SECS`], and the same iPhone's new stream keeps the song's
+/// details until its own arrive.
+#[must_use]
+pub fn carry_over(
+    shown: &NowPlaying,
+    mut fresh: NowPlaying,
+    carry: Carry,
+    now_secs: i64,
+) -> NowPlaying {
+    if !shown.session {
+        return fresh;
+    }
+    if fresh.session {
+        if fresh.dacp_id.is_none() || fresh.dacp_id == shown.dacp_id {
+            if fresh.title.is_none() {
+                fresh.title.clone_from(&shown.title);
+                fresh.artist.clone_from(&shown.artist);
+            }
+            if fresh.position.is_none() {
+                fresh.position = shown.position_at(now_secs).map(|(position, _)| position);
+                fresh.duration = shown.duration;
+                fresh.progress_at = Some(now_secs);
+            }
+            fresh.dacp_id = fresh.dacp_id.or_else(|| shown.dacp_id.clone());
+            fresh.active_remote = fresh.active_remote.or_else(|| shown.active_remote.clone());
+        }
+        return fresh;
+    }
+    if !carry.reachable || carry.idle_secs > KEEP_PAUSED_SECS {
+        return fresh;
+    }
+    let mut kept = shown.clone();
+    if kept.playing && !carry.resuming {
+        kept.position = shown
+            .position_at(now_secs)
+            .map(|(position, _)| position)
+            .or(kept.position);
+        kept.progress_at = Some(now_secs);
+        kept.playing = false;
+    }
+    kept
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     PlayPause,
@@ -469,6 +532,103 @@ mod tests {
                 Some(LightColor::Blue)
             ),
             Light::Off
+        );
+    }
+
+    /// When the recorded session's progress was reported.
+    const REPORTED: i64 = 1_790_496_218;
+
+    fn paused() -> NowPlaying {
+        NowPlaying {
+            playing: false,
+            ..parse(&recorded())
+        }
+    }
+
+    #[test]
+    fn a_pause_outlives_the_iphone_ending_its_stream() {
+        let carry = Carry {
+            reachable: true,
+            resuming: false,
+            idle_secs: 10,
+        };
+        let shown = paused();
+        assert_eq!(
+            carry_over(&shown, NowPlaying::default(), carry, REPORTED + 20),
+            shown
+        );
+    }
+
+    #[test]
+    fn nothing_plays_once_the_iphone_leaves_or_after_a_long_pause() {
+        let shown = paused();
+        let gone = Carry::default();
+        let stale = Carry {
+            reachable: true,
+            resuming: false,
+            idle_secs: KEEP_PAUSED_SECS + 1,
+        };
+        for carry in [gone, stale] {
+            assert!(!carry_over(&shown, NowPlaying::default(), carry, REPORTED).session);
+        }
+    }
+
+    #[test]
+    fn a_play_from_the_deck_shows_while_the_stream_restarts() {
+        let mut shown = paused();
+        shown.anticipate(Command::PlayPause, REPORTED + 30);
+        let carry = Carry {
+            reachable: true,
+            resuming: true,
+            idle_secs: 30,
+        };
+        let kept = carry_over(&shown, NowPlaying::default(), carry, REPORTED + 33);
+        assert!(kept.session && kept.playing);
+        let (position, _) = kept.position_at(REPORTED + 33).expect("BUG: has a length");
+        assert!((position - 7.09).abs() < 0.01, "{position}");
+    }
+
+    #[test]
+    fn a_stream_that_ends_while_playing_freezes_where_it_was() {
+        let shown = parse(&recorded());
+        let carry = Carry {
+            reachable: true,
+            resuming: false,
+            idle_secs: 0,
+        };
+        let kept = carry_over(&shown, NowPlaying::default(), carry, REPORTED + 5);
+        assert!(kept.session && !kept.playing);
+        let (position, _) = kept.position_at(REPORTED + 60).expect("BUG: has a length");
+        assert!((position - 9.09).abs() < 0.01, "{position}");
+    }
+
+    #[test]
+    fn a_restarted_stream_keeps_the_song_until_its_details_arrive() {
+        let shown = paused();
+        let restarted = NowPlaying {
+            session: true,
+            playing: true,
+            dacp_id: shown.dacp_id.clone(),
+            ..NowPlaying::default()
+        };
+        let now = carry_over(&shown, restarted, Carry::default(), REPORTED + 100);
+        assert_eq!((&now.title, &now.artist), (&shown.title, &shown.artist));
+        assert_eq!(now.active_remote, shown.active_remote);
+        let (position, _) = now.position_at(REPORTED + 102).expect("BUG: has a length");
+        assert!((position - 6.09).abs() < 0.01, "{position}");
+    }
+
+    #[test]
+    fn another_iphone_starts_from_its_own_details() {
+        let other = NowPlaying {
+            session: true,
+            playing: true,
+            dacp_id: Some(String::from("0000000000000001")),
+            ..NowPlaying::default()
+        };
+        assert_eq!(
+            carry_over(&paused(), other.clone(), Carry::default(), REPORTED),
+            other
         );
     }
 

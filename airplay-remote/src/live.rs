@@ -13,7 +13,7 @@ use bmc_wasm_sdk::mdns::{MdnsBrowse, MdnsEvent, mdns_browse};
 use bmc_wasm_sdk::*;
 
 use crate::Params;
-use crate::model::{self, BRIDGE_URL, Command, DACP_SERVICE, JsonLookup, Light, NowPlaying};
+use crate::model::{self, BRIDGE_URL, Carry, Command, DACP_SERVICE, JsonLookup, Light, NowPlaying};
 use crate::view::{self, Source, View};
 
 /// How often the bridge is read while an iPhone is connected, and when not.
@@ -29,6 +29,9 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const NOTICE_SECS: i64 = 4;
 /// How long a command's anticipated effect outranks the bridge's older report.
 const HOLD_SECS: i64 = 2;
+/// The same for a play pressed after the iPhone ended its paused stream: it
+/// takes about 4 s to start a new one.
+const RESUME_HOLD_SECS: i64 = 8;
 
 #[derive(Debug, Default, PartialEq)]
 enum Bridge {
@@ -54,6 +57,9 @@ struct Live {
     notice: Option<(String, i64)>,
     /// Until when the anticipated play state and volume stand.
     hold_until: i64,
+    /// Since when the bridge has reported no session while a paused one
+    /// stays on screen (see `model::carry_over`).
+    idle_since: Option<i64>,
     /// What the light strip was last set to.
     light: Option<Light>,
     /// The scene is off screen (between `on_sleep` and `on_wake`).
@@ -84,19 +90,58 @@ impl Live {
         }
     }
 
+    /// The remote-control service of the iPhone with this DACP id, while it
+    /// announces one.
+    fn remote(&self, dacp_id: &str) -> Option<&Remote> {
+        self.remotes
+            .iter()
+            .find(|remote| model::is_remote_of(&remote.name, dacp_id))
+    }
+
     /// Where `command` goes for the connected iPhone, and the token it wants.
     fn target(&self, command: Command) -> Option<(String, String)> {
         let np = self.session()?;
-        let id = np.dacp_id.as_deref()?;
         let token = np.active_remote.clone()?;
-        let remote = self
-            .remotes
-            .iter()
-            .find(|remote| model::is_remote_of(&remote.name, id))?;
+        let remote = self.remote(np.dacp_id.as_deref()?)?;
         Some((
             model::command_url(&remote.host, remote.port, command),
             token,
         ))
+    }
+
+    /// What to show for the bridge's latest report: it, with a command's
+    /// anticipated effect for a moment, and with a paused song kept on screen
+    /// while the iPhone is between audio streams.
+    fn follow(&mut self, mut fresh: NowPlaying, now: i64) -> NowPlaying {
+        let Bridge::Up(shown) = &self.bridge else {
+            self.idle_since = None;
+            return fresh;
+        };
+        let shown = shown.clone();
+        let holding = now < self.hold_until;
+        if holding && fresh.session {
+            fresh.playing = shown.playing;
+            fresh.volume_db = shown.volume_db;
+            fresh.position = shown.position;
+            fresh.progress_at = shown.progress_at;
+        }
+        let idle_since = if fresh.session {
+            None
+        } else {
+            Some(self.idle_since.unwrap_or(now))
+        };
+        let carry = Carry {
+            reachable: shown
+                .dacp_id
+                .as_deref()
+                .is_some_and(|id| self.remote(id).is_some()),
+            resuming: holding && shown.playing,
+            idle_secs: idle_since.map_or(0, |since| now - since),
+        };
+        let next = model::carry_over(&shown, fresh, carry, now);
+        // Idle only counts while a paused session is kept on screen.
+        self.idle_since = if next.session { idle_since } else { None };
+        next
     }
 
     fn notify(&mut self, text: &str, now: i64) {
@@ -170,23 +215,17 @@ fn build(_handle: PollHandle) -> Option<FetchSpec> {
 
 fn on_state(handle: PollHandle, response: &FetchResponse) {
     let now = SystemTime::now().unix_secs;
-    let mut fresh = if response.ok() {
-        Bridge::Up(model::parse(&response.json()))
-    } else {
-        Bridge::Down
-    };
+    let fresh = response.ok().then(|| model::parse(&response.json()));
     let changed = LIVE.with(|live| {
         let mut live = live.borrow_mut();
-        if now < live.hold_until
-            && let (Bridge::Up(fresh), Bridge::Up(shown)) = (&mut fresh, &live.bridge)
-        {
-            fresh.playing = shown.playing;
-            fresh.volume_db = shown.volume_db;
-            fresh.position = shown.position;
-            fresh.progress_at = shown.progress_at;
-        }
-        let changed = live.bridge != fresh;
-        live.bridge = fresh;
+        let next = if let Some(fresh) = fresh {
+            Bridge::Up(live.follow(fresh, now))
+        } else {
+            live.idle_since = None;
+            Bridge::Down
+        };
+        let changed = live.bridge != next;
+        live.bridge = next;
         handle.set_interval(live.poll_interval());
         live.sync_light();
         changed
@@ -307,7 +346,12 @@ fn send(command: Command, now: i64) {
         if let Bridge::Up(np) = &mut live.bridge {
             np.anticipate(command, now);
         }
-        live.hold_until = now + HOLD_SECS;
+        live.hold_until = now
+            + if command == Command::PlayPause && live.idle_since.is_some() {
+                RESUME_HOLD_SECS
+            } else {
+                HOLD_SECS
+            };
         live.sync_light();
     });
     request_frame();

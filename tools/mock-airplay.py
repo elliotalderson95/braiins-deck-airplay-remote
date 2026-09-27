@@ -10,6 +10,10 @@ Then run the testbed with `--rewrite-url http://127.0.0.1:8000=http://127.0.0.1:
 GET /cgi-bin/airplay-remote   the bridge's state, advancing like real playback
 GET /ctrl-int/1/<command>     playpause, nextitem, previtem, volumeup, volumedown;
                               needs the Active-Remote token, as an iPhone does
+
+Like an iPhone, it ends its audio stream a few seconds into a pause, which
+the bridge reports as no session, and starts a new one a few seconds after
+play, whose song details follow a moment later.
 """
 
 import argparse
@@ -26,7 +30,21 @@ TRACKS = [
     ("Signal Fire", "The Northern Lights Orchestra and Friends", 263.0),
 ]
 
-state = {"track": 0, "playing": True, "volume": -12.0, "position": 42.0, "at": time.time()}
+# As measured with an iPhone playing YouTube in Brave.
+STREAM_END_SECS = 6.0
+STREAM_START_SECS = 4.0
+DETAILS_DELAY_SECS = 1.0
+
+state = {
+    "track": 0,
+    "playing": True,
+    "volume": -12.0,
+    "position": 42.0,
+    "at": time.time(),
+    # When a pause ends the audio stream, and when a play starts a new one.
+    "stream_ends_at": None,
+    "stream_starts_at": None,
+}
 
 
 def position_now() -> float:
@@ -37,7 +55,11 @@ def position_now() -> float:
 def snapshot() -> dict:
     title, artist, duration = TRACKS[state["track"]]
     now = time.time()
-    return {
+    ends, starts = state["stream_ends_at"], state["stream_starts_at"]
+    if (ends is not None and now >= ends) or (starts is not None and now < starts):
+        # What the bridge reports between streams.
+        return {"session": False, "playing": False, "updated_at": int(now)}
+    snap = {
         "session": True,
         "playing": state["playing"],
         "title": title,
@@ -51,12 +73,20 @@ def snapshot() -> dict:
         "active_remote": TOKEN,
         "updated_at": int(now),
     }
+    if starts is not None and now < starts + DETAILS_DELAY_SECS:
+        for field in ("title", "artist", "position", "duration", "progress_at"):
+            snap[field] = None
+    return snap
 
 
 def command(name: str) -> bool:
     if name == "playpause":
-        state["position"], state["at"] = position_now(), time.time()
+        now = time.time()
+        state["position"], state["at"] = position_now(), now
         state["playing"] = not state["playing"]
+        ended = state["stream_ends_at"] is not None and now >= state["stream_ends_at"]
+        state["stream_starts_at"] = now + STREAM_START_SECS if ended else None
+        state["stream_ends_at"] = None if state["playing"] else now + STREAM_END_SECS
     elif name in ("volumeup", "volumedown"):
         step = VOLUME_STEP if name == "volumeup" else -VOLUME_STEP
         state["volume"] = max(-30.0, min(0.0, state["volume"] + step))
@@ -79,7 +109,7 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"{time.strftime('%H:%M:%S')} {name}: wrong or missing Active-Remote", flush=True)
                 self._send(403, b"")
             elif command(name):
-                print(f"{time.strftime('%H:%M:%S')} {name} -> {snapshot()['title']}, "
+                print(f"{time.strftime('%H:%M:%S')} {name} -> {TRACKS[state['track']][0]}, "
                       f"{'playing' if state['playing'] else 'paused'}, volume {state['volume']:.2f}", flush=True)
                 self._send(204, b"")
             else:
